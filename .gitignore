@@ -1,0 +1,13 @@
+# datasets, videos, model artifacts, generated outputs - never commit these
+data/
+models/
+outputs/
+
+
+# python / jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# kaggle credentials
+kaggle.json
