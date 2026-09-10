@@ -17,113 +17,176 @@ Usage:
     python3 export_onnx.py --checkpoint path/to/best.pt
     python3 export_onnx.py --opset 13                     # if the device TRT parser complains
 """
+
+from __future__ import annotations
+
 import argparse
-import inspect
 import json
 import time
 from pathlib import Path
+from typing import cast
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 
-def build_model_from_checkpoint(ckpt):
+def build_model_from_checkpoint(ckpt: dict) -> nn.Module:
     """Rebuild the architecture recorded in a project checkpoint (identical to the notebooks)."""
     arch = ckpt["model_arch"]
+    num_classes = ckpt["num_classes"]
+
     if arch == "efficientnet_b0":
         from torchvision.models import efficientnet_b0
+
         model = efficientnet_b0(weights=None)
-        model.classifier[1] = nn.Linear(model.classifier[1].in_features, ckpt["num_classes"])
+        head = cast(nn.Linear, model.classifier[1])
+        model.classifier[1] = nn.Linear(head.in_features, num_classes)
     elif arch == "mobilenet_v3_small":
         from torchvision.models import mobilenet_v3_small
+
         model = mobilenet_v3_small(weights=None)
-        model.classifier[3] = nn.Linear(model.classifier[3].in_features, ckpt["num_classes"])
+        head = cast(nn.Linear, model.classifier[3])
+        model.classifier[3] = nn.Linear(head.in_features, num_classes)
     else:
-        raise ValueError("unknown architecture: " + str(arch))
+        raise ValueError(f"unknown architecture: {arch}")
+
     return model
 
 
-def export_onnx(model, dummy, out_path, opset):
+def export_onnx(model: nn.Module, dummy: torch.Tensor, out_path: Path, opset: int) -> None:
     """Export with the fixed 1x3xHxW input the Jetson pipeline expects."""
-    kwargs = dict(
-        input_names=["input"],
-        output_names=["logits"],
-        opset_version=opset,
-        do_constant_folding=True,
-    )
+    args: tuple[torch.Tensor, ...] = (dummy,)
+    path = str(out_path)
+
     try:
         # Prefer the classic exporter: stable graph, no onnxscript dependency.
-        torch.onnx.export(model, dummy, str(out_path), dynamo=False, **kwargs)
+        torch.onnx.export(
+            model,
+            args,
+            path,
+            input_names=["input"],
+            output_names=["logits"],
+            opset_version=opset,
+            do_constant_folding=True,
+            dynamo=False,
+        )
     except TypeError:
-        # torch without the dynamo kwarg
-        torch.onnx.export(model, dummy, str(out_path), **kwargs)
-    except Exception as exc:  # legacy exporter unavailable in this torch build
-        print("legacy exporter failed (%s); retrying with the dynamo exporter" % exc)
+        # torch without the dynamo kwarg -> plain legacy export
+        torch.onnx.export(
+            model,
+            args,
+            path,
+            input_names=["input"],
+            output_names=["logits"],
+            opset_version=opset,
+            do_constant_folding=True,
+        )
+    except (RuntimeError, ImportError) as exc:
+        # legacy exporter unavailable in this torch build -> fall back to dynamo
+        print(f"legacy exporter failed ({exc}); retrying with the dynamo exporter")
         print("(if this fails with a missing module, run: pip install onnxscript)")
-        torch.onnx.export(model, dummy, str(out_path), dynamo=True, **kwargs)
+        torch.onnx.export(
+            model,
+            args,
+            path,
+            input_names=["input"],
+            output_names=["logits"],
+            opset_version=opset,
+            do_constant_folding=True,
+            dynamo=True,
+        )
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint", default="models/distilled/best.pt",
-                        help="student checkpoint from 04_distillation.ipynb")
-    parser.add_argument("--opset", type=int, default=17,
-                        help="ONNX opset (17 works with TensorRT 8.5+; fall back to 13 if needed)")
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    project_root = Path(__file__).resolve().parent.parent
+
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=project_root / "notebooks" / "weight" / "distillation" / "best.pt",
+        help="student checkpoint from 04_distillation.ipynb",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=project_root / "deployment" / "models" / "distilled",
+        help="directory for deployment artifacts",
+    )
+    parser.add_argument(
+        "--opset",
+        type=int,
+        default=17,
+        help="ONNX opset (17 works with TensorRT 8.5+; use 13 if needed)",
+    )
+
     args = parser.parse_args()
 
-    ckpt_path = Path(args.checkpoint)
+    ckpt_path: Path = args.checkpoint
     if not ckpt_path.exists():
-        raise SystemExit("checkpoint not found: %s (run notebooks/04_distillation.ipynb first, "
-                         "or point --checkpoint at it)" % ckpt_path)
+        raise SystemExit(
+            f"checkpoint not found: {ckpt_path} "
+            "(run notebooks/04_distillation.ipynb first, or point --checkpoint at it)"
+        )
 
-    print("loading checkpoint :", ckpt_path)
-    # weights_only=False: the checkpoint holds plain metadata alongside tensors and is
-    # produced by our own notebooks (torch >= 2.6 defaults to weights_only=True, which
-    # rejects even the stored torch_version object).
+    print(f"loading checkpoint : {ckpt_path}")
+
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
     preprocessing = ckpt["preprocessing"]
     size = preprocessing["image_size"]
 
     model = build_model_from_checkpoint(ckpt)
-    model.load_state_dict(ckpt["state_dict"])   # strict=True: schema must match exactly
+    model.load_state_dict(ckpt["state_dict"])
     model.eval()
+
     params_m = sum(p.numel() for p in model.parameters()) / 1e6
-    print("architecture       : %s (%.2f M params, %d classes)" % (ckpt["model_arch"], params_m, ckpt["num_classes"]))
+    print(
+        f"architecture       : {ckpt['model_arch']} "
+        f"({params_m:.2f} M params, {ckpt['num_classes']} classes)"
+    )
 
     dummy = torch.randn(1, 3, size, size)
-    onnx_path = ckpt_path.with_suffix(".onnx")
-    print("exporting          : %s (input 1x3x%dx%d, opset %d)" % (onnx_path, size, size, args.opset))
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    onnx_path = args.output_dir / "best.onnx"
+
+    print(f"exporting          : {onnx_path} (input 1x3x{size}x{size}, opset {args.opset})")
+
     export_onnx(model, dummy, onnx_path, args.opset)
 
-    # Sanity-check the exported graph if the onnx package is available.
     try:
         import onnx
+
         onnx.checker.check_model(onnx.load(str(onnx_path)))
         print("onnx checker       : PASS")
     except ImportError:
         print("onnx checker       : skipped (pip install onnx to enable)")
 
-    # Sidecar metadata: everything the device needs to reproduce training-time inference
-    # without the .pt checkpoint - exact preprocessing and the class-index mapping.
+    metrics = ckpt.get("metrics", {})
     metadata = {
         "model_arch": ckpt["model_arch"],
         "num_classes": ckpt["num_classes"],
-        "classes": ckpt["classes"],                 # index -> class name
-        "preprocessing": preprocessing,             # image_size / mean / std / interpolation
+        "classes": ckpt["classes"],
+        "preprocessing": preprocessing,
         "input_shape": [1, 3, size, size],
         "opset": args.opset,
         "dataset": ckpt.get("dataset", "stanford_cars"),
-        "metrics": {k: ckpt["metrics"][k] for k in ("val_top1", "val_top5") if k in ckpt.get("metrics", {})},
+        "metrics": {k: metrics[k] for k in ("val_top1", "val_top5") if k in metrics},
         "source_checkpoint": str(ckpt_path),
         "torch_version": ckpt.get("torch_version", torch.__version__),
         "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    meta_path = ckpt_path.with_suffix(".json")
+
+    meta_path = args.output_dir / "metadata.json"
     meta_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     print()
-    print("saved %s (%.1f MB)" % (onnx_path, onnx_path.stat().st_size / 1e6))
-    print("saved %s (classes + preprocessing for the device side)" % meta_path)
+    print(f"saved {onnx_path} ({onnx_path.stat().st_size / 1e6:.1f} MB)")
+    print(f"saved {meta_path} (classes + preprocessing for the device side)")
     print()
     print("next: validate with validate_onnx.py, then deploy (see deployment/README.md)")
 

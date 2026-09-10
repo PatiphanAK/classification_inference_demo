@@ -1,0 +1,28 @@
+[project]
+name = "deployment"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "PatiphanAK", email = "patiphan3new1@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "onnx>=1.22.0",
+    "onnxscript>=0.7.2",
+    "torch>=2.14.0",
+    "torchvision>=0.29.0",
+]
+
+[project.scripts]
+deployment = "deployment:main"
+
+[build-system]
+requires = ["uv_build>=0.12.12,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "flake8>=7.3.0",
+    "pyright>=1.1.414",
+]
