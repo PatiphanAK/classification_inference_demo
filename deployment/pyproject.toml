@@ -6,16 +6,26 @@ readme = "README.md"
 authors = [
     { name = "PatiphanAK", email = "patiphan3new1@gmail.com" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.11"
 dependencies = [
     "onnx>=1.22.0",
     "onnxscript>=0.7.2",
     "torch>=2.14.0",
     "torchvision>=0.29.0",
+    "numpy<2",
 ]
 
 [project.scripts]
 deployment = "deployment:main"
+
+[tool.pyright]
+pythonVersion = "3.10"
+pythonPlatform = "Linux"
+extraPaths = [
+    "/usr/lib/python3.10/dist-packages",
+    "/usr/local/lib/python3.10/dist-packages",
+]
+reportMissingImports = "warning"
 
 [build-system]
 requires = ["uv_build>=0.12.12,<0.13.0"]
@@ -25,4 +35,5 @@ build-backend = "uv_build"
 dev = [
     "flake8>=7.3.0",
     "pyright>=1.1.414",
+    "ruff>=0.16.7",
 ]
